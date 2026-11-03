@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import string
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +14,7 @@ try:
     from cryptography.exceptions import InvalidTag
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+    from rich.cells import cell_len
     from rich.text import Text
     from textual.app import App, ComposeResult
     from textual.binding import Binding
@@ -54,6 +56,37 @@ def looks_secret(name: str) -> bool:
     # hide columns that sound private, like password, token or pin
     words = re.findall(r"[a-z0-9]+", name.lower())
     return any(w.startswith(("pass", "secret", "token")) or w in ("pin", "cvv", "key") for w in words)
+
+
+def looks_money(name: str) -> bool:
+    # columns with price or cost in the name, or a $, count as money
+    if "$" in name:
+        return True
+    words = re.findall(r"[a-z0-9]+", name.lower())
+    return any(w.startswith(("pric", "cost")) for w in words)
+
+
+def is_money(col: dict) -> bool:
+    # a saved choice wins, older tables without one go by the name
+    if "money" in col:
+        return col["money"]
+    return looks_money(col["name"])
+
+
+def to_number(value: str) -> Optional[Decimal]:
+    # pull the first number out of text like "$1,200" or "about 50"
+    cleaned = re.sub(r"[$,\s]", "", value)
+    found = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+    return Decimal(found.group()) if found else None
+
+
+def money_text(total: Decimal, dollar: bool) -> str:
+    # 1400 -> 1,400 and 12.5 -> 12.50, with a $ if the column used one
+    text = f"{abs(total):,.2f}"
+    if text.endswith(".00"):
+        text = text[:-3]
+    text = ("$" if dollar else "") + text
+    return "-" + text if total < 0 else text
 
 
 def is_bool_column(name: str) -> bool:
@@ -379,7 +412,7 @@ class HomeScreen(Screen):
 
 
 # these are blocked when a table is opened in view only mode
-EDIT_ACTIONS = {"add_row", "del_row", "add_col", "del_col", "rename_col", "toggle_secret", "flip", "edit"}
+EDIT_ACTIONS = {"add_row", "del_row", "add_col", "del_col", "rename_col", "toggle_secret", "toggle_money", "flip", "edit"}
 
 
 class TableScreen(Screen):
@@ -392,8 +425,10 @@ class TableScreen(Screen):
         Binding("x", "del_col", "Del col"),
         Binding("r", "rename_col", "Rename col"),
         Binding("t", "toggle_secret", "Hide col"),
+        Binding("m", "toggle_money", "Money col"),
         Binding("s", "reveal", "Reveal"),
         Binding("c", "copy", "Copy"),
+        Binding("ctrl+l", "redraw", "Redraw", show=False),
         Binding("space", "flip", "Flip true/false", show=False),
     ]
 
@@ -436,16 +471,63 @@ class TableScreen(Screen):
         row = dt.cursor_row if row is None else row
         col = dt.cursor_column if col is None else col
         dt.clear(columns=True)
+        shown_rows = [[self.shown(i, v) for i, v in enumerate(r)] for r in self.data["rows"]]
+        totals = self.totals_cells()
+        # set every column width ourselves from the content, textual's auto width
+        # can go stale after edits and leave columns too wide or too narrow
         for i, c in enumerate(self.data["columns"]):
-            dt.add_column(Text(c["name"]), key=str(i))
-        for r in self.data["rows"]:
-            dt.add_row(*[self.shown(i, v) for i, v in enumerate(r)])
+            cells = [c["name"]] + [r[i].plain for r in shown_rows] + ([totals[i].plain] if totals else [])
+            dt.add_column(Text(c["name"]), width=max(cell_len(t) for t in cells), key=str(i))
+        for cells in shown_rows:
+            dt.add_row(*cells)
+        if totals:
+            dt.add_row(*totals)
         if self.data["rows"]:
             dt.move_cursor(
                 row=max(0, min(row, len(self.data["rows"]) - 1)),
                 column=max(0, min(col, len(self.data["columns"]) - 1)),
             )
         self.update_status()
+        # repaint everything now and once more after layout settles, some terminals
+        # (windows especially) can leave old text on screen after a partial update
+        dt.refresh(layout=True)
+        self.call_after_refresh(dt.refresh, layout=True)
+
+    def totals(self) -> tuple[dict, dict]:
+        # add up every money column, blank or non-number cells count as zero
+        sums, dollars = {}, {}
+        for i, col in enumerate(self.data["columns"]):
+            if not is_money(col):
+                continue
+            sums[i] = Decimal(0)
+            dollars[i] = False
+            for row in self.data["rows"]:
+                number = to_number(row[i])
+                if number is not None:
+                    sums[i] += number
+                if "$" in row[i]:
+                    dollars[i] = True
+        return sums, dollars
+
+    def totals_cells(self) -> Optional[list]:
+        # the totals row is drawn on the fly and never saved with the table
+        sums, dollars = self.totals()
+        if not sums or not self.data["rows"]:
+            return None
+        grand = sum(sums.values(), Decimal(0))
+        label = "total"
+        if len(sums) > 1:
+            label += ": " + money_text(grand, any(dollars.values()))
+        cells, labeled = [], False
+        for i in range(len(self.data["columns"])):
+            if i in sums:
+                cells.append(Text(money_text(sums[i], dollars[i]), style="bold"))
+            elif not labeled:
+                cells.append(Text(label, style="bold"))
+                labeled = True
+            else:
+                cells.append(Text(""))
+        return cells
 
     def update_status(self) -> None:
         n = len(self.data["rows"])
@@ -456,6 +538,9 @@ class TableScreen(Screen):
             parts.append(f"column: {c['name']}" + (" (hidden)" if c["secret"] else ""))
         elif not n:
             parts.append("press a to add your first row")
+        sums, dollars = self.totals()
+        if sums and n:
+            parts.append("total: " + money_text(sum(sums.values(), Decimal(0)), any(dollars.values())))
         if self.reveal:
             parts.append("secrets visible")
         self.query_one("#status", Label).update("   ".join(parts))
@@ -473,6 +558,8 @@ class TableScreen(Screen):
         if not self.data["rows"] or not self.data["columns"]:
             return None
         dt = self.query_one(DataTable)
+        if dt.cursor_row >= len(self.data["rows"]):
+            return None  # the cursor is on the totals row
         return dt.cursor_row, dt.cursor_column
 
     def persist(self) -> None:
@@ -483,6 +570,11 @@ class TableScreen(Screen):
 
     def action_back(self) -> None:
         self.app.pop_screen()
+
+    def action_redraw(self) -> None:
+        # manual fix if the screen ever looks wrong
+        self.app.refresh(layout=True)
+        self.rebuild()
 
     def action_reveal(self) -> None:
         self.reveal = not self.reveal
@@ -502,7 +594,8 @@ class TableScreen(Screen):
     def action_edit(self) -> None:
         pos = self.cur()
         if not pos:
-            self.notify("No rows yet, press a to add one")
+            if not self.data["rows"]:
+                self.notify("No rows yet, press a to add one")
             return
         r, c = pos
         col = self.data["columns"][c]
@@ -614,6 +707,14 @@ class TableScreen(Screen):
                 self.rebuild(None, c)
 
         self.app.push_screen(InputModal("Rename column", col["name"]), done)
+
+    def action_toggle_money(self) -> None:
+        c = self.query_one(DataTable).cursor_column
+        col = self.data["columns"][c]
+        col["money"] = not is_money(col)
+        self.persist()
+        self.rebuild(None, c)
+        self.notify(f"{col['name']} is {'counted in totals' if col['money'] else 'not counted'}")
 
     def action_toggle_secret(self) -> None:
         c = self.query_one(DataTable).cursor_column
