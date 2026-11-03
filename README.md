@@ -2,11 +2,6 @@
 
 A small encrypted table app for the terminal. Make tables like a password list, add or remove columns whenever you want, and everything is saved encrypted under random file names.
 
-I created this for myself, but wanted to make a full open-source github repo. this will forever remain fully open-source.
-
-When I get to the API Integration, I will have full documentation on how to use it edit it and have it be as you need.
-
-
 ## Install
 
 ```
@@ -47,12 +42,29 @@ Pick a table from the list, or choose **+ New table** and give it a name and som
 | x | remove the column |
 | r | rename the column |
 | t | hide or show a column's values |
+| m | count a column in the totals (or stop counting it) |
 | s | reveal hidden values |
 | c | copy the selected cell |
 | Space | flip a true/false cell |
+| Ctrl+L | redraw the screen if it ever looks wrong |
 | Esc | back to the list |
 
 Columns with names like password, token or pin are hidden by default. While editing one, press `ctrl+g` to generate a strong password.
+
+## Totals
+
+Any column with price, cost or a $ in its name is added up automatically. The sums show in a bold row at the bottom, right under each column, and the combined total is shown on the left and in the status line.
+
+```
+item   link       price    upgrades   price2
+1      test.com   $1200    mount      $200
+2      test.com   $200     pad        $50
+total: $1,650      $1,400              $250
+```
+
+- Numbers can be written as `1200`, `$1,200` or `$12.50`. Blank cells and text are skipped.
+- The totals row is worked out on the fly and never saved, so old tables work as they are.
+- Press `m` on any column to add it to the totals or take it out.
 
 ## Where your data goes
 
@@ -70,13 +82,3 @@ To back up, copy the whole folder, including the hidden `.salt` file. Without it
 - The key comes from your master password using scrypt.
 - File names are random, and real table names exist only inside the encrypted index.
 - It protects files at rest. It does not protect against malware on your computer.
-
-
-
-
-
-## Future Plans
-
-- API Intergration
-- Discord Bot Intergration
-- Custom Encryption
